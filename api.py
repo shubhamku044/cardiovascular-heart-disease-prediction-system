@@ -1,15 +1,15 @@
 import pickle
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
-from sklearn.preprocessing import MinMaxScaler
-from typing import List, Optional
+from typing import List, Dict, Optional, Any
 import uvicorn
+import os
 
 # Create FastAPI app
 app = FastAPI(
-    title="Cardiovascular Heart Disease Prediction API",
-    description="API for predicting heart disease risk based on patient data",
+    title="Enhanced Cardiovascular Heart Disease Prediction API",
+    description="API for predicting heart disease risk based on patient data using multiple ML models",
     version="1.0.0"
 )
 
@@ -48,46 +48,139 @@ class PatientData(BaseModel):
             }
         }
 
-# Define response model
-class PredictionResponse(BaseModel):
+# Define response model for a single model prediction
+class ModelPrediction(BaseModel):
     prediction: int  # 0 = low risk, 1 = high risk
     probability: float
     risk_level: str
+
+# Define response model for all predictions
+class AllPredictionsResponse(BaseModel):
+    predictions: Dict[str, ModelPrediction]
+    consensus_prediction: int
+    consensus_risk_level: str
     recommendation: str
+    model_agreement_percentage: float
 
-# Load the model
+# Class to load and manage all models
 class HeartDiseasePredictor:
-    def __init__(self, model_path='knn_model_normalized.pkl'):
-        self.load_model(model_path)
-        self.scaler = MinMaxScaler()
+    def __init__(self):
+        self.models = {}
+        self.scalers = {}
+        self.load_models_and_scalers()
         
-    def load_model(self, model_path):
+    def load_models_and_scalers(self):
+        """Load all available models and scalers"""
+        # Load scalers
         try:
-            with open(model_path, 'rb') as file:
-                self.model = pickle.load(file)
-        except FileNotFoundError:
-            raise Exception(f"Error: Model file '{model_path}' not found.")
-
-    def predict(self, features):
-        # Reshape and normalize the features
+            with open('standard_scaler.pkl', 'rb') as file:
+                self.scalers['standard'] = pickle.load(file)
+            
+            with open('minmax_scaler.pkl', 'rb') as file:
+                self.scalers['minmax'] = pickle.load(file)
+        except FileNotFoundError as e:
+            print(f"Error loading scalers: {e}")
+            
+        # Define model types and scaling methods
+        model_types = ['knn', 'logistic_regression', 'naive_bayes', 'random_forest']
+        scaling_methods = ['scaled', 'normalized']
+        
+        # Load all available models
+        for model_type in model_types:
+            for scaling in scaling_methods:
+                model_path = f"{model_type}_model_{scaling}.pkl"
+                model_key = f"{model_type}_{scaling}"
+                
+                try:
+                    with open(model_path, 'rb') as file:
+                        self.models[model_key] = pickle.load(file)
+                        print(f"Loaded {model_key}")
+                except FileNotFoundError:
+                    print(f"Model {model_path} not found")
+    
+    def predict_with_all_models(self, features):
+        """Make predictions using all available models"""
+        results = {}
+        
+        # Reshape features for transformation
         features_reshaped = features.reshape(1, -1)
-        features_normalized = self.scaler.fit_transform(features_reshaped)
         
-        # Make prediction
-        prediction = self.model.predict(features_normalized)
-        prediction_proba = self.model.predict_proba(features_normalized)
+        # Transform features with both scalers
+        features_scaled = self.scalers['standard'].transform(features_reshaped)
+        features_normalized = self.scalers['minmax'].transform(features_reshaped)
         
-        return prediction[0], prediction_proba[0]
+        # Make predictions with all models
+        for model_key, model in self.models.items():
+            try:
+                # Use appropriate features based on model type
+                if '_scaled' in model_key:
+                    transformed_features = features_scaled
+                else:  # '_normalized' in model_key
+                    transformed_features = features_normalized
+                
+                # Make prediction
+                prediction = model.predict(transformed_features)[0]
+                
+                # Get probability if available
+                try:
+                    probability = model.predict_proba(transformed_features)[0][prediction]
+                except (AttributeError, IndexError):
+                    probability = None
+                
+                # Create risk level
+                risk_level = "High risk of heart disease" if prediction == 1 else "Low risk of heart disease"
+                
+                # Store results
+                results[model_key] = {
+                    "prediction": int(prediction),
+                    "probability": float(probability) if probability is not None else None,
+                    "risk_level": risk_level
+                }
+            except Exception as e:
+                print(f"Error with model {model_key}: {e}")
+                results[model_key] = {
+                    "prediction": None,
+                    "probability": None,
+                    "risk_level": f"Error: {str(e)}"
+                }
+        
+        return results
+    
+    def get_consensus_prediction(self, predictions):
+        """Calculate the consensus prediction from all models"""
+        valid_predictions = [p["prediction"] for p in predictions.values() if p["prediction"] is not None]
+        
+        if not valid_predictions:
+            return None, None, 0
+        
+        # Count predictions
+        positive_count = sum(1 for p in valid_predictions if p == 1)
+        total_count = len(valid_predictions)
+        
+        # Calculate consensus
+        consensus = 1 if positive_count / total_count > 0.5 else 0
+        agreement_percentage = (max(positive_count, total_count - positive_count) / total_count) * 100
+        
+        # Create risk level
+        risk_level = "High risk of heart disease" if consensus == 1 else "Low risk of heart disease"
+        
+        return consensus, risk_level, agreement_percentage
 
 # Initialize predictor
 predictor = HeartDiseasePredictor()
 
 @app.get("/")
 async def root():
-    return {"message": "Welcome to the Cardiovascular Heart Disease Prediction API"}
+    return {"message": "Welcome to the Enhanced Cardiovascular Heart Disease Prediction API"}
 
-@app.post("/predict", response_model=PredictionResponse)
-async def predict_heart_disease(data: PatientData):
+@app.get("/models")
+async def list_models():
+    """List all available models"""
+    return {"available_models": list(predictor.models.keys())}
+
+@app.post("/predict_all", response_model=AllPredictionsResponse)
+async def predict_with_all_models(data: PatientData):
+    """Make predictions using all available models"""
     try:
         # Convert input data to numpy array
         features = np.array([
@@ -96,25 +189,90 @@ async def predict_heart_disease(data: PatientData):
             data.oldpeak, data.slope, data.ca, data.thal
         ])
         
+        # Get predictions from all models
+        all_predictions = predictor.predict_with_all_models(features)
+        
+        # Get consensus prediction
+        consensus, risk_level, agreement = predictor.get_consensus_prediction(all_predictions)
+        
+        # Create recommendation based on consensus
+        if consensus == 1:
+            recommendation = "Please consult a healthcare professional for a thorough evaluation."
+        else:
+            recommendation = "Continue maintaining a healthy lifestyle with regular check-ups."
+        
+        # Format predictions for response model
+        formatted_predictions = {}
+        for model_key, pred in all_predictions.items():
+            if pred["prediction"] is not None:
+                formatted_predictions[model_key] = ModelPrediction(
+                    prediction=pred["prediction"],
+                    probability=pred["probability"] if pred["probability"] is not None else 0.0,
+                    risk_level=pred["risk_level"]
+                )
+        
+        return AllPredictionsResponse(
+            predictions=formatted_predictions,
+            consensus_prediction=consensus,
+            consensus_risk_level=risk_level,
+            recommendation=recommendation,
+            model_agreement_percentage=agreement
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/predict/{model_name}")
+async def predict_with_specific_model(data: PatientData, model_name: str):
+    """Make a prediction using a specific model"""
+    if model_name not in predictor.models:
+        raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")
+    
+    try:
+        # Convert input data to numpy array
+        features = np.array([
+            data.age, data.sex, data.cp, data.trestbps, data.chol, 
+            data.fbs, data.restecg, data.thalach, data.exang, 
+            data.oldpeak, data.slope, data.ca, data.thal
+        ])
+        
+        # Reshape features for transformation
+        features_reshaped = features.reshape(1, -1)
+        
+        # Use appropriate scaler based on model name
+        if '_scaled' in model_name:
+            transformed_features = predictor.scalers['standard'].transform(features_reshaped)
+        else:  # '_normalized' in model_name
+            transformed_features = predictor.scalers['minmax'].transform(features_reshaped)
+        
         # Make prediction
-        prediction, probability = predictor.predict(features)
+        model = predictor.models[model_name]
+        prediction = model.predict(transformed_features)[0]
+        
+        # Get probability if available
+        try:
+            probability = model.predict_proba(transformed_features)[0][prediction]
+        except (AttributeError, IndexError):
+            probability = None
         
         # Create response
         risk_level = "High risk of heart disease" if prediction == 1 else "Low risk of heart disease"
         recommendation = "Please consult a healthcare professional for a thorough evaluation." if prediction == 1 else "Continue maintaining a healthy lifestyle with regular check-ups."
         
-        return PredictionResponse(
-            prediction=int(prediction),
-            probability=float(probability[prediction]),
-            risk_level=risk_level,
-            recommendation=recommendation
-        )
+        return {
+            "model": model_name,
+            "prediction": int(prediction),
+            "probability": float(probability) if probability is not None else None,
+            "risk_level": risk_level,
+            "recommendation": recommendation
+        }
+    
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    return {"status": "healthy", "models_loaded": len(predictor.models)}
 
 if __name__ == "__main__":
-    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("enhanced_api:app", host="0.0.0.0", port=8000, reload=True)

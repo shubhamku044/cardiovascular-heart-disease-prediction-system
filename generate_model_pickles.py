@@ -16,12 +16,15 @@ Models included:
 import pickle
 import pandas as pd
 import numpy as np
+import os
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.naive_bayes import GaussianNB
 from sklearn.ensemble import RandomForestClassifier
+
+OUT_DIR = 'pickles'
 
 # Load the dataset
 print("Loading dataset...")
@@ -48,10 +51,10 @@ X_test_normalized = normalizer.transform(X_test)
 
 # Save the scalers
 print("Saving scalers...")
-with open('standard_scaler.pkl', 'wb') as file:
+with open(os.path.join(OUT_DIR, 'standard_scaler.pkl'), 'wb') as file:
     pickle.dump(scaler, file)
 
-with open('minmax_scaler.pkl', 'wb') as file:
+with open(os.path.join(OUT_DIR, 'minmax_scaler.pkl'), 'wb') as file:
     pickle.dump(normalizer, file)
 
 # Dictionary to store all models
@@ -80,12 +83,12 @@ for model_name, model_variants in models.items():
     
     # Train and save scaled model
     model_variants['scaled'].fit(X_train_scaled, y_train)
-    with open(f'{model_name}_model_scaled.pkl', 'wb') as file:
+    with open(os.path.join(OUT_DIR, f'{model_name}_model_scaled.pkl'), 'wb') as file:
         pickle.dump(model_variants['scaled'], file)
     
     # Train and save normalized model
     model_variants['normalized'].fit(X_train_normalized, y_train)
-    with open(f'{model_name}_model_normalized.pkl', 'wb') as file:
+    with open(os.path.join(OUT_DIR, f'{model_name}_model_normalized.pkl'), 'wb') as file:
         pickle.dump(model_variants['normalized'], file)
 
 print("All models have been trained and saved successfully!")
